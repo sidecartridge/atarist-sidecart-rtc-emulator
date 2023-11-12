@@ -67,14 +67,15 @@ _ntp_ready:
 ;    move.w (sp)+, sr                    ; Restore the status register
     print ready_datetime_msg
 
+    rts
+
 ; DISABLED FOR NOW. NEED TO FIX THE CODE
 ; Save the old XBIOS vector in RTCEMUL_OLD_XBIOS and set our own vector
 ;    print set_vectors_msg
 ;    bsr save_vectors
 ;    tst.w d0
 ;    bne _exit_timemout
-
-    rts
+;    rts
 
 _exit_timemout:
 ;    move.w (sp)+, sr                    ; Restore the status register
@@ -259,8 +260,6 @@ print_char:
     movem.l  (sp)+, d0-d7     ; Pop all registers
 
     rts                       ; Return from subroutine
-
-
 
 ; Send an async command to the Sidecart
 ; Fire and forget style
