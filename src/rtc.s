@@ -19,18 +19,19 @@
 ; CONSTANTS
 RANDOM_SEED             equ $1284FBCD  ; Random seed for the random number generator. Should be provided by the pico in the future
 QUERY_NTP_WAIT_TIME     equ 60         ; Number of seconds (aprox) to wait for a ping response from the Sidecart. Power of 2 numbers. Max 127.
-RANDOM_TOKEN_ADDR:        equ (ROM4_BUFFER_ADDR)
-RANDOM_TOKEN_SEED_ADDR:   equ (RANDOM_TOKEN_ADDR + 4) ; RANDOM_TOKEN_ADDR + 0 bytes
 
 ROM4_START_ADDR         equ $FA0000 ; ROM4 start address
 ROM3_START_ADDR         equ $FB0000 ; ROM3 start address
-ROM4_BUFFER_ADDR        equ (ROM4_START_ADDR  + $7000)      ; ROM4 buffer address
+ROM_EXCHG_BUFFER_ADDR   equ (ROM3_START_ADDR)               ; ROM4 buffer address
+RANDOM_TOKEN_ADDR:        equ (ROM_EXCHG_BUFFER_ADDR)
+RANDOM_TOKEN_SEED_ADDR:   equ (RANDOM_TOKEN_ADDR + 4) ; RANDOM_TOKEN_ADDR + 0 bytes
+
 CMD_MAGIC_NUMBER        equ (ROM3_START_ADDR + $ABCD)       ; Magic number to identify a command
 APP_RTCEMUL             equ $0300                           ; MSB is the app code. RTC is $03
 CMD_TEST_NTP            equ ($0 + APP_RTCEMUL)              ; Command code to ping to the Sidecart
 CMD_READ_DATETME        equ ($1 + APP_RTCEMUL)              ; Command code to read the date and time from the Sidecart
 CMD_SAVE_VECTORS        equ ($2 + APP_RTCEMUL)              ; Command code to save the vectors in the Sidecart
-RTCEMUL_NTP_SUCCESS     equ (ROM4_BUFFER_ADDR + $8)         ; Magic number to identify a successful NTP query
+RTCEMUL_NTP_SUCCESS     equ (ROM_EXCHG_BUFFER_ADDR + $8)         ; Magic number to identify a successful NTP query
 RTCEMUL_DATETIME        equ (RTCEMUL_NTP_SUCCESS + $2)      ; ntp_success + 2 bytes
 RTCEMUL_OLD_XBIOS       equ (RTCEMUL_DATETIME + $4)         ; ntp_success + 4 bytes
 
