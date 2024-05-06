@@ -333,83 +333,73 @@ _start_async_code_in_stack:
 
     ; SEND PAYLOAD SIZE
     move.l a0, d0               ; Address of the ROM3 in d0    
-    or.w d1, d0                 ; OR high and low words in d0
+    move.w d1, d0                 ; OR high and low words in d0
     move.l d0, a1               ; move to a1 ready to read from this address
     move.b (a1), d0             ; Command payload size. d0 is a scratch register
     tst.w d1
     beq _no_more_payload_stack        ; If the command does not have payload, we are done.
 
     ; SEND PAYLOAD
-    move.l a0, d0
-    or.w d2, d0
+    move.w d2, d0
     move.l d0, a1
     move.b (a1), d0           ; Command payload low d2
     cmp.w #2, d1
     beq _no_more_payload_stack
 
     swap d2
-    move.l a0, d0
-    or.w d2, d0
+    move.w d2, d0
     move.l d0, a1
     move.b (a1), d0           ; Command payload high d2
     cmp.w #4, d1
     beq _no_more_payload_stack
 
-    move.l a0, d0
-    or.w d3, d0
+    move.w d3, d0
     move.l d0, a1
     move.b (a1), d0           ; Command payload low d3
     cmp.w #6, d1
     beq _no_more_payload_stack
 
     swap d3
-    move.l a0, d0
-    or.w d3, d0
+    move.w d3, d0
     move.l d0, a1
     move.b (a1), d0           ; Command payload high d3
     cmp.w #8, d1
     beq _no_more_payload_stack
 
-    move.l a0, d0
-    or.w d4, d0
+    move.w d4, d0
     move.l d0, a1
     move.b (a1), d0           ; Command payload low d4
     cmp.w #10, d1
     beq _no_more_payload_stack
 
     swap d4
-    move.l a0, d0
-    or.w d4, d0
+    move.w d4, d0
     move.l d0, a1
     move.b (a1), d0           ; Command payload high d4
     cmp.w #12, d1
     beq.s _no_more_payload_stack
 
-    move.l a0, d0
-    or.w d5, d0
+    move.w d5, d0
     move.l d0, a1
     move.b (a1), d0           ; Command payload low d5
     cmp.w #14, d1
     beq.s _no_more_payload_stack
 
     swap d5
-    move.l a0, d0
-    or.w d5, d0
+    move.w d5, d0
     move.l d0, a1
     move.b (a1), d0           ; Command payload high d5
     cmp.w #16, d1
     beq.s _no_more_payload_stack
 
-    move.l a0, d0
-    or.w d6, d0
+    move.w d6, d0
     move.l d0, a1
     move.b (a1), d0           ; Command payload low d6
     cmp.w #18, d1
     beq.s _no_more_payload_stack
 
     swap d6
-    move.l a0, d0
-    or.w d6, d0
+    move.w d6, d0
     move.l d0, a1
     move.b (a1), d0           ; Command payload high d6
 
