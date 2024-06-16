@@ -443,7 +443,8 @@ _end_sync_code_in_stack:
 
         even
 rtc_emulator_msg:
-        dc.b	"SidecarT Real Time Clock - "
+        dc.b	"SidecarTridge Multi-device",$d,$A
+        dc.b    "Real Time Clock - "
         
 version:
         dc.b    "v"
@@ -470,7 +471,7 @@ ready_datetime_msg:
         dc.b	"+- Date and time set.",$d,$a,0
 
 error_sidecart_comm_msg:
-        dc.b	$d,$a,"Sidecart error communication. Reset!",$d,$a,0
+        dc.b	$d,$a,"Communication error. Press reset.",$d,$a,0
 
 backwards:
         dc.b    $8, $8,0
