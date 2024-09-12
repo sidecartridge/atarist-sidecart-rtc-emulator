@@ -1,5 +1,5 @@
-; SidecarT RTC Disk Drive (FDD) Emulator
-; (C) 2023 by Diego Parrilla
+; SidecarTridge Multidevice Real Time Clock (RTC) Emulator
+; (C) 2023-24 by Diego Parrilla
 ; License: GPL v3
 
 ; Emulate a RTC and sets the IKBD clock from the SidecarT
