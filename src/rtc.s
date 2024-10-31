@@ -96,8 +96,6 @@ _retest_ntp:
     bsr send_sync_command_to_sidecart
 
     move.w (sp)+, d7
-    tst.w d0                            ; 0 if no error
-    bne.s _test_ntp_timeout             ; The RP2040 is not responding, timeout now
 
     cmp.w #$FFFF, RTCEMUL_NTP_SUCCESS
     bne.s _ntp_not_yet                ; The NTP has a valid date, exit
