@@ -36,6 +36,7 @@ RTCEMUL_DATETIME        equ (RTCEMUL_NTP_SUCCESS + $2)      ; ntp_success + 2 by
 RTCEMUL_OLD_XBIOS       equ (RTCEMUL_DATETIME + $4)         ; ntp_success + 4 bytes
 
 XBIOS_TRAP_ADDR         equ $b8                             ; TRAP #14 Handler (XBIOS)
+_longframe      equ $59e    ; Address of the long frame flag. If this value is 0 then the processor uses short stack frames, otherwise it uses long stack frames.
 
     ifne _DEBUG
         include inc/tos.s
@@ -68,15 +69,15 @@ _ntp_ready:
 ;    move.w (sp)+, sr                    ; Restore the status register
     print ready_datetime_msg
 
-    rts
+;    rts
 
 ; DISABLED FOR NOW. NEED TO FIX THE CODE
 ; Save the old XBIOS vector in RTCEMUL_OLD_XBIOS and set our own vector
-;    print set_vectors_msg
-;    bsr save_vectors
-;    tst.w d0
-;    bne _exit_timemout
-;    rts
+    print set_vectors_msg
+    bsr save_vectors
+    tst.w d0
+    bne _exit_timemout
+    rts
 
 _exit_timemout:
 ;    move.w (sp)+, sr                    ; Restore the status register
@@ -126,7 +127,7 @@ _test_ntp_timeout:
 
 save_vectors:
     move.w #CMD_SAVE_VECTORS,d0          ; Command code to save the vectors
-    move.w #4,d1                         ; Payload size is 0 bytes. No payload
+    move.w #4,d1                         ; Payload size is 4 bytes.
     move.l XBIOS_TRAP_ADDR.w,d3            ; Address of the old XBIOS vector
 
     bsr send_sync_command_to_sidecart
@@ -143,26 +144,32 @@ _read_timeout:
     rts
 
 custom_xbios:
-    move.l sp,a0
-; On non68000 CPU we need to compensate for long stackframe
-	tst.w $59e
-	beq.s _non68000
-	addq.w #2,a1
-_non68000:
-    btst #5,(sp)                    ; check if called from user mode
-    bne.s _not_user                 ; if not, do not correct stack pointer
-    move.l usp,a0                   ; if yes, correct stack pointer
-    subq.l #6,a0                    ; correct stack pointer
-_not_user:
-    move.w 6(a0),d0                 ; get XBIOS call number
-    cmp.w #23,d0                    ; is it XBIOS call 23 / getdatetime?
-    beq.s _getdatetime              ; if yes, go to our own routine
+    btst #5, (sp)                    ; Check if called from user mode
+    beq.s _user_mode                 ; if so, do correct stack pointer
+_not_user_mode:
+    move.l sp,a0                     ; Move stack pointer to a0
+    bra.s _check_cpu
+_user_mode:
+    move.l usp,a0                    ; if user mode, correct stack pointer
+    subq.l #6,a0
+;
+; This code checks if the CPU is a 68000 or not
+;
+_check_cpu:
+    tst.w _longframe                ; Check if the CPU is a 68000 or not
+    beq.s _notlong
+_long:
+    addq.w #2, a0                   ; Correct the stack pointer parameters for long frames 
+_notlong:
+;    move.w 6(a0),d0                 ; get XBIOS call number
+;    cmp.w #23,d0                    ; is it XBIOS call 23 / getdatetime?
+;    beq.s _getdatetime              ; if yes, go to our own routine
     cmp.w #22,d0                    ; is it XBIOS call 22 / setdatetime?
     beq.s _setdatetime              ; if yes, go to our own routine
 
 _continue_xbios:
-    move.l RTCEMUL_OLD_XBIOS,a0        ; get old XBIOS vector
-    jmp (a0)
+    move.l RTCEMUL_OLD_XBIOS, -(sp) ; if not, continue with XBIOS call
+    rts 
 
 ; Adjust the time when reading to compensate for the Y2K problem
 _getdatetime:
@@ -174,13 +181,15 @@ _getdatetime:
 
 ; Adjust the time when setting to compensate for the Y2K problem
 _setdatetime:
-	move.l 2(a0),d0
-	sub.l #$3c000000,d0
-	move.l d0,-(sp)
-	move.w #22,-(sp)
-	trap #14
-	addq.l #6,sp
-    rte
+    sub.l #$3c000000,2(a0)
+    bra.s _continue_xbios
+;	move.l 2(a0),d0
+;	sub.l #$3c000000,d0
+;	move.l d0,-(sp)
+;	move.w #22,-(sp)
+;	trap #14
+;	addq.l #6,sp
+;   rte
 
 ; Get the date and time from the RP2040 and set the IKBD information
 set_datetime:
