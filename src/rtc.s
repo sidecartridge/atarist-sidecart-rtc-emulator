@@ -23,6 +23,8 @@ QUERY_NTP_WAIT_TIME     equ 60         ; Number of seconds (aprox) to wait for a
 ROM4_START_ADDR         equ $FA0000 ; ROM4 start address
 ROM3_START_ADDR         equ $FB0000 ; ROM3 start address
 ROM_EXCHG_BUFFER_ADDR   equ (ROM3_START_ADDR)               ; ROM4 buffer address
+RANDOM_TOKEN_POST_WAIT: equ $1        ; Wait this cycles after the random number generator is ready
+
 RANDOM_TOKEN_ADDR:        equ (ROM_EXCHG_BUFFER_ADDR)
 RANDOM_TOKEN_SEED_ADDR:   equ (RANDOM_TOKEN_ADDR + 4) ; RANDOM_TOKEN_ADDR + 0 bytes
 
@@ -31,10 +33,18 @@ APP_RTCEMUL             equ $0300                           ; MSB is the app cod
 CMD_TEST_NTP            equ ($0 + APP_RTCEMUL)              ; Command code to ping to the Sidecart
 CMD_READ_DATETME        equ ($1 + APP_RTCEMUL)              ; Command code to read the date and time from the Sidecart
 CMD_SAVE_VECTORS        equ ($2 + APP_RTCEMUL)              ; Command code to save the vectors in the Sidecart
-RTCEMUL_NTP_SUCCESS     equ (ROM_EXCHG_BUFFER_ADDR + $8)         ; Magic number to identify a successful NTP query
-RTCEMUL_DATETIME        equ (RTCEMUL_NTP_SUCCESS + $2)      ; ntp_success + 2 bytes
-RTCEMUL_OLD_XBIOS       equ (RTCEMUL_DATETIME + $4)         ; ntp_success + 4 bytes
+CMD_REENTRY_LOCK        equ ($3 + APP_RTCEMUL)              ; Command code to lock the reentry to XBIOS in the Sidecart
+CMD_REENTRY_UNLOCK      equ ($4 + APP_RTCEMUL)              ; Command code to unlock the reentry to XBIOS in the Sidecart
+CMD_SET_SHARED_VAR      equ ($5 + APP_RTCEMUL)              ; Command code to set a shared variable in the Sidecart
+RTCEMUL_NTP_SUCCESS     equ (ROM_EXCHG_BUFFER_ADDR + 8)    ; Magic number to identify a successful NTP query
+RTCEMUL_DATETIME_BCD    equ (RTCEMUL_NTP_SUCCESS + 4)      ; ntp_success + 4 bytes
+RTCEMUL_DATETIME_MSDOS  equ (RTCEMUL_DATETIME_BCD + 8)     ; datetime_bcd + 8 bytes
+RTCEMUL_OLD_XBIOS       equ (RTCEMUL_DATETIME_MSDOS + 8)   ; datetime_msdos + 8 bytes
+RTCEMUL_REENTRY_TRAP    equ (RTCEMUL_OLD_XBIOS + 4)        ; old_bios + 4 bytes
+RTCEMUL_Y2K_PATCH       equ (RTCEMUL_REENTRY_TRAP + 4)     ; reentry_trap + 4 byte
+RTCEMUL_SHARED_VARIABLES equ (RTCEMUL_Y2K_PATCH + 8)       ; y2k_patch + 8 bytes
 
+_dskbufp                equ $4c6                            ; Address of the disk buffer pointer    
 XBIOS_TRAP_ADDR         equ $b8                             ; TRAP #14 Handler (XBIOS)
 _longframe      equ $59e    ; Address of the long frame flag. If this value is 0 then the processor uses short stack frames, otherwise it uses long stack frames.
 
@@ -47,40 +57,92 @@ _longframe      equ $59e    ; Address of the long frame flag. If this value is 0
         org $FA0040
         include inc/tos.s
     endif
+
+    include inc/sidecart_macros.s
+
+; Send a synchronous command to the Sidecart setting the reentry flag for the next XBIOS calls
+; inside our trapped XBIOS calls. Should be always paired with reentry_xbios_unlock
+reentry_xbios_lock	macro
+                    movem.l d0-d7/a0-a6,-(sp)            ; Save all registers
+                    send_sync CMD_REENTRY_LOCK,0         ; Command code to lock the reentry
+                    movem.l (sp)+,d0-d7/a0-a6            ; Restore all registers
+                	endm
+
+; Send a synchronous command to the Sidecart clearing the reentry flag for the next XBIOS calls
+; inside our trapped XBIOS calls. Should be always paired with reentry_xbios_lock
+reentry_xbios_unlock  macro
+                    movem.l d0-d7/a0-a6,-(sp)            ; Save all registers
+                    send_sync CMD_REENTRY_UNLOCK,0       ; Command code to unlock the reentry
+                    movem.l (sp)+,d0-d7/a0-a6            ; Restore all registers
+                	endm
+
 rom_function:
     print rtc_emulator_msg
-;    move.w sr, -(sp)                    ; Save the status register
-;    move.w #$2700, sr                  ; Disable interrupts
+
+    bsr get_tos_version
+    bsr detect_hw
 
 ; Wait for the NTP in the RP2040 to be ready;
     print query_ntp_msg
     bsr test_ntp
     tst.w d0
-    bne.s _exit_timemout
+    bne _exit_timemout
 
 ; NTP ready, now we can safely set the date and time
 _ntp_ready:
-    print set_datetime_msg
+    send_sync CMD_READ_DATETME,0         ; Command code to read the date and time
+    tst.w d0                            ; 0 if no error
+    bne _exit_timemout                   ; The RP2040 is not responding, timeout now
 
-    bsr set_datetime
-    tst.w d0
-    bne.s _exit_timemout
+_show_tos_version:
+    bsr print_tos_version
 
-;    move.w (sp)+, sr                    ; Restore the status register
-    print ready_datetime_msg
+_set_vectors:
 
-;    rts
+    tst.l RTCEMUL_Y2K_PATCH
+    beq.s _set_vectors_ignore
 
-; DISABLED FOR NOW. NEED TO FIX THE CODE
+; We don't need to fix Y2K problem in EmuTOS
 ; Save the old XBIOS vector in RTCEMUL_OLD_XBIOS and set our own vector
     print set_vectors_msg
     bsr save_vectors
     tst.w d0
     bne _exit_timemout
+
+_set_vectors_ignore:
+    pea RTCEMUL_DATETIME_BCD            ; Buffer should have a valid IKBD date and time format
+    move.w #6, -(sp)                    ; Six bytes plus the header = 7 bytes
+    move.w #25, -(sp)                   ; 
+    trap #14
+    addq.l #8, sp
+
+    print set_datetime_msg
+
+
+    move.l RTCEMUL_DATETIME_MSDOS, d0
+    bsr set_datetime
+    tst.w d0
+    bne _exit_timemout
+
+	move.w #23,-(sp)                    ; gettime from XBIOS
+	trap #14
+	addq.l #2,sp
+
+    tst.l RTCEMUL_Y2K_PATCH
+    beq.s _ignore_y2k
+    add.l #$3c000000,d0                 ; +30 years to guarantee the Y2K problem works in all TOS versions
+_ignore_y2k:
+
+    move.l d0, -(sp)                    ; Save the date and time in MSDOS format
+    move.w #22,-(sp)                    ; settime with XBIOS
+    trap #14
+    addq.l #6, sp
+
+    print ready_datetime_msg
+
     rts
 
 _exit_timemout:
-;    move.w (sp)+, sr                    ; Restore the status register
     asksil error_sidecart_comm_msg
     rts
 
@@ -88,14 +150,10 @@ _exit_timemout:
 
 ; Ask the RPP2040 is the NTP is working and has a valid date and time
 test_ntp:
-    move.w #QUERY_NTP_WAIT_TIME, d7           ; Wait for a while until ping responds
+    move.w #QUERY_NTP_WAIT_TIME, d7      ; Wait for a while until ping responds
 _retest_ntp:
     move.w d7, -(sp)                 
-    move.w #CMD_TEST_NTP,d0              ; Command code to test the NTP
-    move.w #0,d1                         ; Payload size is 0 bytes. No payload
-
-    bsr send_sync_command_to_sidecart
-
+    send_sync CMD_TEST_NTP,0            ; Command code to test the NTP
     move.w (sp)+, d7
 
     cmp.w #$FFFF, RTCEMUL_NTP_SUCCESS
@@ -126,17 +184,15 @@ _test_ntp_timeout:
     rts
 
 save_vectors:
-    move.w #CMD_SAVE_VECTORS,d0          ; Command code to save the vectors
-    move.w #4,d1                         ; Payload size is 4 bytes.
-    move.l XBIOS_TRAP_ADDR.w,d3            ; Address of the old XBIOS vector
-
-    bsr send_sync_command_to_sidecart
+    move.l XBIOS_TRAP_ADDR.w,d3          ; Address of the old XBIOS vector
+    send_sync CMD_SAVE_VECTORS,4         ; Send the command to the Sidecart
     tst.w d0                            ; 0 if no error
     bne.s _read_timeout                 ; The RP2040 is not responding, timeout now
 
     ; Now we have the XBIOS vector in RTCEMUL_OLD_XBIOS
     ; Now we can safely change it to our own vector
     move.l #custom_xbios,XBIOS_TRAP_ADDR.w    ; Set our own vector
+
     rts
 
 _read_timeout:
@@ -144,6 +200,13 @@ _read_timeout:
     rts
 
 custom_xbios:
+    btst #0, RTCEMUL_REENTRY_TRAP      ; Check if the reentry is locked
+    beq.s _custom_bios_trapped         ; If the bit is active, we are in a reentry call. We need to exec_old_handler the code
+
+    move.l RTCEMUL_OLD_XBIOS, -(sp) ; if not, continue with XBIOS call
+    rts 
+
+_custom_bios_trapped:
     btst #5, (sp)                    ; Check if called from user mode
     beq.s _user_mode                 ; if so, do correct stack pointer
 _not_user_mode:
@@ -161,10 +224,9 @@ _check_cpu:
 _long:
     addq.w #2, a0                   ; Correct the stack pointer parameters for long frames 
 _notlong:
-;    move.w 6(a0),d0                 ; get XBIOS call number
-;    cmp.w #23,d0                    ; is it XBIOS call 23 / getdatetime?
-;    beq.s _getdatetime              ; if yes, go to our own routine
-    cmp.w #22,d0                    ; is it XBIOS call 22 / setdatetime?
+    cmp.w #23,6(a0)                 ; is it XBIOS call 23 / getdatetime?
+    beq.s _getdatetime              ; if yes, go to our own routine
+    cmp.w #22,6(a0)                 ; is it XBIOS call 22 / setdatetime?
     beq.s _setdatetime              ; if yes, go to our own routine
 
 _continue_xbios:
@@ -172,56 +234,55 @@ _continue_xbios:
     rts 
 
 ; Adjust the time when reading to compensate for the Y2K problem
+; We should not tap this call for EmuTOS
 _getdatetime:
+    reentry_xbios_lock
 	move.w #23,-(sp)
 	trap #14
 	addq.l #2,sp
-	add.l #$3c000000,d0
+	add.l #$3c000000,d0 ; +30 years for all TOS except EmuTOS
+    reentry_xbios_unlock
 	rte
 
 ; Adjust the time when setting to compensate for the Y2K problem
+; We should not tap this call for TOS 2.06 and EmuTOS
 _setdatetime:
-    sub.l #$3c000000,2(a0)
+	sub.l #$3c000000,8(a0)
     bra.s _continue_xbios
-;	move.l 2(a0),d0
-;	sub.l #$3c000000,d0
-;	move.l d0,-(sp)
-;	move.w #22,-(sp)
-;	trap #14
-;	addq.l #6,sp
-;   rte
 
 ; Get the date and time from the RP2040 and set the IKBD information
+; d0.l : Date and time in MSDOS format
 set_datetime:
-    move.w #CMD_READ_DATETME,d0          ; Command code READ DATETIME
-    move.w #0,d1                         ; Payload size is 0 bytes. No payload
+    move.l d0, d7
 
-    bsr send_sync_command_to_sidecart
-    tst.w d0                            ; 0 if no error
-    bne _read_timeout                 ; The RP2040 is not responding, timeout now
+    bsr print_hour
+    pchar ':'
+    move.l d7, d0
+    bsr print_minute
+    pchar ':'
+    move.l d7, d0
+    bsr print_seconds
 
-    ; The date and time comes in the buffer
+    pchar ' '
 
-    pea RTCEMUL_DATETIME                ; Buffer should have a valid IKBD date and time format
-    move.w #6, -(sp)                    ; Six bytes plus the header = 7 bytes
-    move.w #25, -(sp)                   ; 
-    trap #14
-    addq.l #8, sp
+    swap d7
+    move.l d7, d0
+    bsr print_day
+    pchar '/'
+    move.l d7, d0
+    bsr print_month
+    pchar '/'
+    move.l d7, d0
+    bsr print_year
 
-    moveq #0, d0
-
-	move.w #23,-(sp)                    ; gettime from XBIOS
-	trap #14
-	addq.l #2,sp
-
-    add.l #$3c000000,d0                 ; Fix the Y2K problem
-
-	move.l d0,d7
+    swap d7
 
 	move.w d7,-(sp)
 	move.w #$2d,-(sp)                   ; settime with GEMDOS
 	trap #1
 	addq.l #4,sp
+    tst.w d0
+    bne.s _exit_set_time
 
 	swap d7
 
@@ -229,224 +290,88 @@ set_datetime:
 	move.w #$2b,-(sp)                   ; settime with GEMDOS  
 	trap #1
 	addq.l #4,sp
+    tst.w d0
+    bne.s _exit_set_time
 
     ; And we are done!
     moveq #0, d0
     rts
-
-print_hex:
-    movem.l d0-d7, -(sp)     ; Push all registers
-    move.l  d0, d6           ; Copy D0 to D6 for manipulation
-    rol.l #8, d6             ; Shift right by 8 bits to get the next byte
-    moveq   #7, d1           ; Counter for 8 nibbles (32 bits / 4 bits per nibble)
-
-print_next_nibble:
-    move.l  d6, d3           ; Copy D2 to D3 to extract the nibble
-    btst    #0, d1           ;
-    beq.s   print_low_nibble ; If the counter is even, print the low nibble
-print_high_nibble:
-    lsr.l   #4, d3           ; Shift right by 4 bits to get the high nibble
-    bra.s print_nibble
-print_low_nibble:
-    rol.l #8, d6             ; Shift right by 8 bits to get the next byte
-print_nibble:
-    andi.l  #$0F, d3         ; Mask off all but the lower nibble
-    cmpi.l  #$0A, d3         ; Compare with 10 to determine if it's A-F
-    blt.s   digit            ; If less than 10, it's a digit
-    addi.l  #$37, d3         ; Convert to ASCII ('A' - 'F')
-    bra.s   print_char
-digit:
-    addi.l  #$30, d3        ; Convert to ASCII ('0' - '9')
-print_char:
-    move.w  d3, -(sp)        ; Push the character to print
-    move.w  #2, -(sp)		; Push 2 bytes to print
-    trap    #1               ; Print char
-    addq.l  #4, sp           ; Rewind stack
-
-    dbra    d1, print_next_nibble  ; Decrement d1 and branch if not yet zero
-
-    movem.l  (sp)+, d0-d7     ; Pop all registers
-
-    rts                       ; Return from subroutine
-
-; Send an async command to the Sidecart
-; Fire and forget style
-; Input registers:
-; d0.w: command code
-; d1.w: payload size
-; From d2 to d7 the payload based on the size of the payload field d1.w
-; The order is: d2.l d2.h d3.l d3.h d4.l d4.h d5.l d5.h d6.l d6.h d7.l d7.h
-; the limit is not 12 words, but since this code is going to be executed in the
-; Atari ST ROM, its difficult to not use a buffer in RAM
-; Output registers:
-; d1-d7 are modified. a0-a3 modified.
-send_async_command_to_sidecart:
-    move.l #_end_async_code_in_stack - _start_async_code_in_stack, d7
-    lea -(_end_async_code_in_stack - _start_async_code_in_stack)(sp), sp
-    move.l sp, a2
-    lea _start_async_code_in_stack, a1    ; a1 points to the start of the code in ROM
-    lsr.w #2, d7
-    subq #1, d7
-_copy_async_code:
-    move.l (a1)+, (a2)+
-    dbf d7, _copy_async_code
-    jsr (a3)                                                            ; Jump to the code in the stack
-    lea (_end_async_code_in_stack - _start_async_code_in_stack)(sp), sp
+_exit_set_time:
+    moveq #-1, d0
     rts
 
-; Send an sync command to the Sidecart
-; Wait until the command sets a response in the memory with a random number used as a token
-; Input registers:
-; d0.w: command code
-; d1.w: payload size
-; From d3 to d7 the payload based on the size of the payload field d1.w
-; Output registers:
-; d0: error code, 0 if no error
-; d1-d7 are modified. a0-a3 modified.
-send_sync_command_to_sidecart:
-    move.l #_end_sync_code_in_stack - _start_sync_code_in_stack, d7
-    lea -(_end_sync_code_in_stack - _start_sync_code_in_stack)(sp), sp
-    move.l sp, a2
-    move.l sp, a3
-    lea _start_sync_code_in_stack, a1    ; a1 points to the start of the code in ROM
-    lsr.w #2, d7
-    subq #1, d7
-_copy_sync_code:
-    move.l (a1)+, (a2)+
-    dbf d7, _copy_sync_code
-    move.w #$4e71, (_no_async_return - _start_sync_code_in_stack)(a3)   ; Put a NOP when sync
-    jsr (a3)                                                            ; Jump to the code in the stack
-    lea (_end_sync_code_in_stack - _start_sync_code_in_stack)(sp), sp
+print_seconds:
+    and.l #%11111,d0
+    print_num
     rts
 
-_start_sync_code_in_stack:
-    ; The sync command synchronize with a random token
-    move.l RANDOM_TOKEN_SEED_ADDR,d2
-    mulu  #221,d2
-    add.b #53, d2                       ; Save the random number in d2
-    addq.w #4, d1                       ; Add 4 bytes to the payload size to include the token
-
-_start_async_code_in_stack:
-    move.l #ROM3_START_ADDR, a0 ; Start address of the ROM3
-
-    ; SEND HEADER WITH MAGIC NUMBER
-    swap d0                     ; Save the command code in the high word of d0         
-    move.b CMD_MAGIC_NUMBER, d0; Command header. d0 is a scratch register
-
-    ; SEND COMMAND CODE
-    swap d0                     ; Recover the command code
-    move.l a0, a1               ; Address of the ROM3
-    add.w d0, a1                ; We can use add because the command code msb is 0 and there is no sign extension            
-    move.b (a1), d0             ; Command code. d0 is a scratch register
-
-    ; SEND PAYLOAD SIZE
-    move.l a0, d0               ; Address of the ROM3 in d0    
-    or.w d1, d0                 ; OR high and low words in d0
-    move.l d0, a1               ; move to a1 ready to read from this address
-    move.b (a1), d0             ; Command payload size. d0 is a scratch register
-    tst.w d1
-    beq _no_more_payload_stack        ; If the command does not have payload, we are done.
-
-    ; SEND PAYLOAD
-    move.l a0, d0
-    or.w d2, d0
-    move.l d0, a1
-    move.b (a1), d0           ; Command payload low d2
-    cmp.w #2, d1
-    beq _no_more_payload_stack
-
-    swap d2
-    move.l a0, d0
-    or.w d2, d0
-    move.l d0, a1
-    move.b (a1), d0           ; Command payload high d2
-    cmp.w #4, d1
-    beq _no_more_payload_stack
-
-    move.l a0, d0
-    or.w d3, d0
-    move.l d0, a1
-    move.b (a1), d0           ; Command payload low d3
-    cmp.w #6, d1
-    beq _no_more_payload_stack
-
-    swap d3
-    move.l a0, d0
-    or.w d3, d0
-    move.l d0, a1
-    move.b (a1), d0           ; Command payload high d3
-    cmp.w #8, d1
-    beq _no_more_payload_stack
-
-    move.l a0, d0
-    or.w d4, d0
-    move.l d0, a1
-    move.b (a1), d0           ; Command payload low d4
-    cmp.w #10, d1
-    beq _no_more_payload_stack
-
-    swap d4
-    move.l a0, d0
-    or.w d4, d0
-    move.l d0, a1
-    move.b (a1), d0           ; Command payload high d4
-    cmp.w #12, d1
-    beq.s _no_more_payload_stack
-
-    move.l a0, d0
-    or.w d5, d0
-    move.l d0, a1
-    move.b (a1), d0           ; Command payload low d5
-    cmp.w #14, d1
-    beq.s _no_more_payload_stack
-
-    swap d5
-    move.l a0, d0
-    or.w d5, d0
-    move.l d0, a1
-    move.b (a1), d0           ; Command payload high d5
-    cmp.w #16, d1
-    beq.s _no_more_payload_stack
-
-    move.l a0, d0
-    or.w d6, d0
-    move.l d0, a1
-    move.b (a1), d0           ; Command payload low d6
-    cmp.w #18, d1
-    beq.s _no_more_payload_stack
-
-    swap d6
-    move.l a0, d0
-    or.w d6, d0
-    move.l d0, a1
-    move.b (a1), d0           ; Command payload high d6
-
-_no_more_payload_stack:
-    swap d2                   ; D2 is the only register that is not used as a scratch register
-_no_async_return:
-    rts                 ; if the code is SYNC, we will NOP this
-_end_async_code_in_stack:
-
-    move.l #$FFFF000F, d7                   ; Most significant word is the inner loop, least significant word is the outer loop
-_wait_sync_for_token_a_lot:
-    swap d7
-_wait_sync_for_token:
-    cmp.l RANDOM_TOKEN_ADDR, d2              ; Compare the random number with the token
-    beq.s _sync_token_found                  ; Token found, we can finish succesfully
-    dbf d7, _wait_sync_for_token
-    swap d7
-    dbf d7, _wait_sync_for_token_a_lot
-_sync_token_not_found:
-    moveq #-1, d0                     ; Timeout
+print_minute:
+    lsr.l #5, d0
+    and.l #%111111,d0
+    print_num
     rts
-_sync_token_found:
-    clr.w d0                            ; Clear the error code
-    rts
-    nop
 
-_end_sync_code_in_stack:
+print_hour:
+    lsr.l #8, d0
+    lsr.l #3, d0
+    and.l #%11111,d0
+    print_num
+    rts
+
+print_day:
+    and.l #%11111,d0
+    print_num
+    rts
+
+print_month:
+    lsr.l #5, d0
+    and.l #%1111,d0
+    print_num
+    rts
+
+print_year:
+    lsr.l #8, d0
+    lsr.l #1, d0
+    and.l #%1111111,d0
+    sub.l #20, d0 ; Year - 1980
+    print_num
+    rts
+
+; Print the obtained TOS version
+print_tos_version:
+    print set_version_msg   ; Print the TOS version message
+
+    move.l (RTCEMUL_SHARED_VARIABLES + (SHARED_VARIABLE_SVERSION * 4)), d0   ; Get the TOS version from the shared variables
+    swap d0
+    and.l #$FFFF,d0
+    move.w d0, d1
+    lsr.w #8, d1    ; Major version
+
+    move.w d0, d2
+    and.w #$FF, d2  ; Minor version
+
+    add.w #48, d1
+    move.w d1, d0
+    pchar_reg
+
+    pchar '.'
+
+;    move.w d2, d0
+;    print_num
+    move.w d2, d0
+    swap d0
+    lsl.l #8, d0
+    moveq #1, d1    ; Number of digits to print minus 1 
+    print_hex
+
+    pchar '.'
+    pchar '.'
+    pchar '.'
 
     rts
+
+    include "inc/sidecart_functions.s"
+
 
         even
 rtc_emulator_msg:
@@ -466,16 +391,19 @@ spacing:
         dc.b    "+" ,$d,$a,0
 
 set_vectors_msg:
-        dc.b	"+- Set vectors...",$d,$a,0
+        dc.b	$d,$a,"+- Set vectors...",0
 
 query_ntp_msg:
         dc.b	"+- Querying a NTP server...",0
 
 set_datetime_msg:
-        dc.b	$d,$a,"+- Setting date and time.",$d,$a,0
+        dc.b	$d,$a,"+- Date and time: ",0
+
+set_version_msg:
+        dc.b	$d,$a,"+- TOS version: ",0
 
 ready_datetime_msg:
-        dc.b	"+- Date and time set.",$d,$a,0
+        dc.b	$d,$a,"+- Date and time set.",0
 
 error_sidecart_comm_msg:
         dc.b	$d,$a,"Communication error. Press reset.",$d,$a,0
